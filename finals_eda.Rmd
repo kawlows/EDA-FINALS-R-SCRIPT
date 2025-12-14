@@ -1,0 +1,250 @@
+---
+title: "Exploratory Data Analysis of SMS Spam vs. Ham"
+author: "Karl Michael Gaca, Ray Bernados, Francis Torillo"
+date: "`r format(Sys.Date(), '%B %d, %Y')`"
+output:
+  pdf_document:
+    toc: true
+    number_sections: true
+fontsize: 11pt
+geometry: margin=1in
+---
+
+```{r, include = FALSE}
+knitr::opts_chunk$set(
+  echo = TRUE,
+  message = FALSE,
+  warning = FALSE
+)
+
+library(tidyverse)
+library(tidytext)
+library(ggplot2)
+library(tidymodels)
+library(tidylo)
+library(janitor)
+library(stringr)
+library(textrecipes)
+```
+
+**Introduction**  
+
+Mobile phone users daily receive unsolicited and fraudulent text messages that are either promotional or targeted at getting victims' personal data as well as manipulating them into taking potentially hazardous actions. These so-called “spam” or phishing messages could have direct financial implications and could dent victims' confidence and trust in online communications. It thus becomes imperative to grasp the pattern and structure of these fraudulent messages as well as regular ones. Exploratory Data Analysis will be conducted on the SMS Spam Collection Dataset with an objective of understanding the character and extent of difference that might exist between fraudulent and regular text messages based on size and specific word features.
+
+**Data**  
+
+The SMS Spam Collection contains 5,574 English-language SMS messages as a collection for research on spam filtering. It labels all messages as either ham messages (legitimate messages) and spam. It uses a collection of legitimate SMS messages from the NUS SMS Corpus and spam messages gathered from various online sources like spam messages on SMS and online forums. Specifically for this project, it uses the Kaggle distribution as a CSV file with column v1 as ham/spam label and column v2 as message text. All data columns, except columns v1 and v2, are discarded after loading. Also, character data columns are converted from Latin-1 encoding to Unicode UTF-8.
+
+EDA consists of basic structural tests like the total number of instances, proportion of instances belonging to ham and spam messages, and some basic measures on length variables for all messages. Other preprocessing steps include conversion to lowercase letters, word extraction, removal of common stopwords, and derivation of basic numerical variables like character count, word count, digit presence, presence of URLs, and count of all uppercase letters. All these derived variables will be utilized for generating summary statistics and plots for presenting the results, and at the same time, the text will be used for generating frequency graphs and message class word scores based on term frequency and log odds.
+
+**Loading and initial cleaning**  
+
+```{r}
+library(readr)
+library(janitor)
+library(dplyr)
+library(stringr)
+
+data_path <- "C:/Users/gacak/Downloads/EDA FINALS/spam.csv"
+
+sms_raw <- read_csv(
+  file = data_path,
+  locale = locale(encoding = "latin1")
+)
+
+sms_raw <- sms_raw |>
+  mutate(across(
+    where(is.character),
+    ~ iconv(.x, from = "latin1", to = "UTF-8", sub = "")
+  ))
+
+sms <- sms_raw |>
+  clean_names() |>          # v1, v2, x3, x4, ...
+  rename(
+    label = v1,
+    text  = v2
+  ) |>
+  mutate(
+    label = factor(label, levels = c("ham", "spam")),
+    text  = as.character(text)
+  )
+```
+```{r inspect-sms}
+glimpse(sms)
+
+sms |>
+dplyr::select(label, text) |>
+dplyr::slice_head(n = 5)
+```
+**Methods**  
+
+```{r}
+sms_feats <- sms |>
+  mutate(
+    n_chars  = nchar(text),
+    n_words  = str_count(text, "\\S+"),
+    n_digits = str_count(text, "\\d"),
+    n_urls   = str_count(text, "http[s]?://|www\\."),
+    n_caps   = str_count(text, "\\b[A-Z]{2,}\\b")
+  )
+```
+**Tokenization and stopword removal**  
+
+```{r}
+data("stop_words")
+
+tokens <- sms |>
+  unnest_tokens(word, text) |>
+  anti_join(stop_words, by = "word") |>
+  filter(str_detect(word, "[a-z]"))
+
+tokens |> glimpse()
+tokens |> count(label)
+```
+**Results**  
+
+```{r}
+#Message-level structure
+ggplot(sms_feats, aes(x = n_words, fill = label)) +
+  geom_histogram(alpha = 0.6, position = "identity", bins = 40) +
+  coord_cartesian(xlim = c(0, 60)) +
+  labs(
+    title = "SMS length in words by class",
+    x = "Number of words",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+```{r}
+sms_feats |>
+  pivot_longer(
+    cols = c(n_chars, n_words, n_digits, n_urls, n_caps),
+    names_to = "feature",
+    values_to = "value"
+  ) |>
+  ggplot(aes(x = label, y = value, fill = label)) +
+  geom_boxplot(outlier.alpha = 0.2) +
+  facet_wrap(~ feature, scales = "free_y") +
+  theme_minimal() +
+  labs(
+    title = "Message-level features by class",
+    x = "",
+    y = "Value"
+  )
+```
+**Unigram frequencies**  
+
+```{r}
+uni_counts <- tokens |>
+  count(label, word, sort = TRUE)
+
+uni_counts |> group_by(label) |> slice_max(n, n = 10)
+```
+```{r}
+uni_counts |>
+  group_by(label) |>
+  slice_max(n, n = 20) |>
+  ungroup() |>
+  ggplot(aes(x = reorder_within(word, n, label), y = n, fill = label)) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~ label, scales = "free_y") +
+  scale_x_reordered() +
+  labs(
+    title = "Top unigrams by class",
+    x = "",
+    y = "Count"
+  ) +
+  theme_minimal()
+```
+**Class-specific words via log-odds**  
+
+```{r}
+uni_log_odds <- uni_counts |>
+  bind_log_odds(label, word, n)
+
+uni_log_odds |>
+  group_by(label) |>
+  slice_max(log_odds_weighted, n = 20) |>
+  ungroup() |>
+  ggplot(aes(
+    x = reorder_within(word, log_odds_weighted, label),
+    y = log_odds_weighted,
+    fill = label
+  )) +
+  geom_col(show.legend = FALSE) +
+  coord_flip() +
+  facet_wrap(~ label, scales = "free_y") +
+  scale_x_reordered() +
+  labs(
+    title = "Class-specific words (weighted log-odds)",
+    x = "",
+    y = "Weighted log-odds"
+  ) +
+  theme_minimal()
+```
+**Baseline classification**  
+
+```{r}
+set.seed(123)
+
+# Optionally subsample for faster training (keeps EDA on full data)
+sms_small <- sms |>
+  group_by(label) |>
+  slice_sample(n = 1000, replace = FALSE) |>
+  ungroup()
+
+# Train-test split
+sms_split <- initial_split(sms_small, strata = label)
+sms_train <- training(sms_split)
+sms_test  <- testing(sms_split)
+
+# Recipe: tokenize, limit vocabulary size, compute tf-idf
+sms_rec <- recipe(label ~ text, data = sms_train) |>
+  step_tokenize(text) |>
+  step_tokenfilter(text, max_tokens = 2000) |>
+  step_tfidf(text) |>
+  step_zv(all_predictors())
+
+# Logistic regression model
+log_spec <- logistic_reg() |>
+  set_engine("glm")
+
+log_wf <- workflow() |>
+  add_model(log_spec) |>
+  add_recipe(sms_rec)
+
+# Fit model
+log_fit <- fit(log_wf, data = sms_train)
+
+# Predictions and performance on test set
+sms_pred <- predict(log_fit, sms_test, type = "prob") |>
+  bind_cols(
+    predict(log_fit, sms_test),
+    sms_test |> select(label)
+  )
+
+metrics(sms_pred, truth = label, estimate = .pred_class)
+conf_mat(sms_pred, truth = label, estimate = .pred_class)
+```
+**Discussion**
+
+The EDA reveals that spam emails are typically much longer and ‘denser’ with regards to certain features compared to ham emails, and they have more numbers, more URLs, and more words. All these features align with the fact that spam emails often include phone numbers, codes, and links compared to ham emails, which are perhaps short conversations among people who know each other. The box plots for length variables and histograms for word variables bring out these aspects graphically, with spam variables shifted to the right on most variables.
+
+At the lexical level, word and log-odds analyses show that spams make use of a smaller set of promotional words and transactional words like words associated with prizes, money, and limited opportunities. On the other hand, hams use a more varied set of words associated with everyday life. These observations imply that even very elementary features, like the presence of certain highly weighted spam words and message lengths and numbers of URLs, can be useful signal features for distinguishing hams and spams, as shown by the fact that the baseline tf-idf model with logistic regression performs reasonably well on a test set.
+
+**Limitations and ethics**
+
+Despite its popularity, there are some limitations in SMS Spam Collection, which impact the level to which these conclusions can be generalized. It mainly contains English-language SMS messages from a particular set of sources and times, and thus may not be reflective of spam methods and usage in different languages and on newer messaging services where multimedia messages and usage of slang have become quite common. It also uses binary classification: ham and spam messages, which might have some differences among phishing, scams, and aggressive marketing.
+
+From an ethical viewpoint, there are some considerations involving text messages. Although these messages are anonymized and made available for public distribution, it should be remembered that there are responsibilities and constraints even with these considerations. As a fact, the particular set of data employed for analysis within this project has been preprocessed, and it should be remembered that there are obligations not to engage in efforts and actions geared at resubmitting certain messages and at making available these particular pieces of information. Furthermore, there should be careful consideration with rules and models created as a consequence of an analysis.
+
+**Conclusion**
+
+This exploratory analysis of the SMS Spam Collection highlights clear structural and lexical differences between spam and ham messages that can be leveraged for simple, interpretable detection strategies. Spam texts are generally longer, contain more numeric and URL content, and repeatedly use a focused set of promotional and urgent phrases, while ham texts are shorter on average and linguistically more diverse. A basic tf–idf logistic regression model built on these features performs reasonably well, supporting the idea that these patterns are not only descriptive but also predictive in practice, even without complex architectures. For practitioners and users, the results underscore the value of both technical filters and user education that emphasize caution around messages containing unsolicited offers, links, and pressure to act quickly.
+
+**Reproducibility and AI assistance**
+
+All analyses in this project are implemented in an R Markdown document that combines code, narrative text, and figures in a single, version-controlled file. The document specifies the exact dataset path, package versions, and preprocessing steps (including encoding conversion, tokenization, and feature engineering), so that the results can be reproduced by rerunning the Rmd on the same spam.csv file. The code relies entirely on open-source R packages (such as tidyverse, tidytext, tidymodels, and textrecipes), and all generated plots and tables are created programmatically rather than being edited manually.
+
+In line with emerging expectations for responsible data science practice, this report also includes a brief statement describing how generative AI tools were used as part of the workflow. AI assistance was used to help design the EDA plan, suggest R code templates, and propose draft wording for some sections, but all code was executed, checked, and adapted by the students(us, yey self shout-out!), and the final interpretations and conclusions were reviewed and adjusted to reflect the actual results.
